@@ -2,7 +2,7 @@ import { FIREBASE_CONFIG } from './firebase-config.js';
 import * as L from './lib.js';
 import { firestoreStore, demoStore, setWriteErrorHandler } from './store.js';
 
-const APP_VERSION = '20261026-230905';
+const APP_VERSION = '20261026-231853';
 const SDK = 'https://www.gstatic.com/firebasejs/12.0.0/';
 const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const DEMO = LOCAL && new URLSearchParams(location.search).has('demo');
@@ -137,7 +137,8 @@ function applyRecurring() {
     if (now.getDate() < day) continue;
     S.recDone.add(c.id + ym); next.push(c.id);
     const id = `rec-${c.id}-${ym}`;
-    if (S.exps.some((e) => e.id === id)) continue;
+    // Déjà présent (charge auto, ou montant importé du Sheet pour ce mois) : pas de doublon
+    if (S.exps.some((e) => e.id === id || e.id === `imp-${c.id}-${ym}`)) continue;
     ops.push({ op: 'set', col: 'expenses', id, data: { amount: c.rec.amount, cat: c.id, at: `${ym}-${pad(day)}T08:00`, ym, note: 'Automatique', src: 'rec', created: Date.now() } });
   }
   if (next.length !== applied.length) {
@@ -767,6 +768,8 @@ function previewImport(an) {
       ops.push({ op: 'set', col: 'expenses', id, data: { amount: v, cat: cid, at: `${m}-01T12:00`, ym: m, note: 'Import Sheets', src: 'import', created: Date.now() } });
     }
     for (const e of S.exps) if (e.src === 'import' && months.includes(e.ym) && !keep.has(e.id)) ops.push({ op: 'delete', col: 'expenses', id: e.id });
+    // Une charge auto déjà ajoutée est remplacée par le montant importé du même mois
+    for (const e of S.exps) if (e.src === 'rec' && keep.has(`imp-${e.cat}-${e.ym}`)) ops.push({ op: 'delete', col: 'expenses', id: e.id });
     for (const [m, v] of Object.entries(income)) ops.push({ op: 'merge', col: 'months', id: m, data: { income: v } });
     // Montant habituel des abonnements : dernière valeur connue
     for (const c of S.cats) {
