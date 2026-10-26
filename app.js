@@ -2,7 +2,7 @@ import { FIREBASE_CONFIG } from './firebase-config.js';
 import * as L from './lib.js';
 import { firestoreStore, demoStore, setWriteErrorHandler } from './store.js';
 
-const APP_VERSION = 'dev';
+const APP_VERSION = '20261026-214151';
 const SDK = 'https://www.gstatic.com/firebasejs/12.0.0/';
 const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const DEMO = LOCAL && new URLSearchParams(location.search).has('demo');
