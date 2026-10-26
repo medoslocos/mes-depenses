@@ -1,5 +1,5 @@
 // Service worker : l'app s'ouvre hors connexion (coquille en cache) ; Firestore gère lui-même la file d'attente des données.
-const VERSION = '20261026-214151';
+const VERSION = '20261026-230905';
 const CACHE = 'depenses-' + VERSION;
 const SHELL = ['./', './index.html', './app.js', './lib.js', './store.js', './firebase-config.js', './style.css', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 const SDK = 'https://www.gstatic.com/firebasejs/';

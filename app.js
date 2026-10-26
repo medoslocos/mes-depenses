@@ -2,7 +2,7 @@ import { FIREBASE_CONFIG } from './firebase-config.js';
 import * as L from './lib.js';
 import { firestoreStore, demoStore, setWriteErrorHandler } from './store.js';
 
-const APP_VERSION = '20261026-214151';
+const APP_VERSION = '20261026-230905';
 const SDK = 'https://www.gstatic.com/firebasejs/12.0.0/';
 const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const DEMO = LOCAL && new URLSearchParams(location.search).has('demo');
@@ -178,17 +178,35 @@ $('#login-send').onclick = async () => {
   btn.disabled = false;
 };
 $('#login-back').onclick = () => { $('#login-step1').hidden = false; $('#login-step2').hidden = true; loginMsg(''); };
-$('#login-paste').onclick = () => completeLink($('#login-link').value.trim());
+$('#login-paste').onclick = async () => {
+  const btn = $('#login-paste');
+  if (btn.disabled) return;
+  // Tolère du texte autour du lien et les &amp; d'un copier-coller depuis un mail
+  const raw = $('#login-link').value.replace(/&amp;/g, '&');
+  const link = (raw.match(/https?:\/\/\S+/) || [raw.trim()])[0];
+  if (!link) return loginMsg('Colle d\'abord le lien reçu par e-mail.');
+  btn.disabled = true; btn.textContent = 'Connexion…'; loginMsg('');
+  await completeLink(link);
+  btn.disabled = false; btn.textContent = 'Me connecter';
+};
 async function completeLink(link) {
-  if (!FB.A.isSignInWithEmailLink(FB.auth, link)) return loginMsg("Ce n'est pas un lien de connexion valide (copie le lien entier du mail).");
-  let email = localStorage.getItem('emailForSignIn') || $('#login-email').value.trim();
-  if (!email) email = (prompt('Confirme ton adresse e-mail') || '').trim();
-  if (!email) return;
   try {
-    await FB.A.signInWithEmailLink(FB.auth, email, link);
+    if (!FB.A.isSignInWithEmailLink(FB.auth, link)) return loginMsg("Ce n'est pas un lien de connexion valide (copie le lien entier du mail).");
+    let email = localStorage.getItem('emailForSignIn') || $('#login-email').value.trim() || $('#login-sent-to').textContent.trim();
+    if (!email) email = (prompt('Confirme ton adresse e-mail') || '').trim();
+    if (!email) return loginMsg("Indique ton adresse e-mail (bouton « Changer d'adresse »), puis recolle le lien.");
+    const timeout = new Promise((_, rej) => setTimeout(() => rej({ code: 'timeout' }), 20000));
+    await Promise.race([FB.A.signInWithEmailLink(FB.auth, email, link), timeout]);
     localStorage.setItem('emailForSignIn', email);
     if (location.search) history.replaceState(null, '', location.pathname);
-  } catch (e) { showLogin(); loginMsg(authError(e)); }
+    // onAuthStateChanged ouvre l'app ; au cas où il tarde, on l'ouvre directement
+    if (FB.auth.currentUser && !S.store) { S.user = FB.auth.currentUser; start(firestoreStore(FB.F, FB.db, FB.auth.currentUser.uid)); }
+  } catch (e) {
+    console.error(e);
+    if (FB.auth.currentUser) return;
+    showLogin();
+    loginMsg(e.code === 'timeout' ? 'Le serveur ne répond pas (réseau faible ?). Réessaie.' : authError(e));
+  }
 }
 
 // ---------- Navigation et rendu ----------
