@@ -2,7 +2,7 @@ import { FIREBASE_CONFIG } from './firebase-config.js';
 import * as L from './lib.js';
 import { firestoreStore, demoStore, setWriteErrorHandler } from './store.js';
 
-const APP_VERSION = '20261027-132125';
+const APP_VERSION = '20261027-211312';
 const SDK = 'https://www.gstatic.com/firebasejs/12.0.0/';
 const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const DEMO = LOCAL && new URLSearchParams(location.search).has('demo');
@@ -17,8 +17,9 @@ let FB = null; // { A, F, auth, db }
 const S = {
   store: null, user: null, ready: false,
   groups: [], cats: [], exps: [], months: {}, pending: 0,
-  view: 'add', ym: L.ymOf(new Date()),
-  amount: '', neg: false, cat: null, whenTouched: false, chipOrder: null,
+  view: 'month', ym: L.ymOf(new Date()),
+  closed: new Set((() => { try { return JSON.parse(localStorage.getItem('closedGroups')) || []; } catch { return []; } })()),
+  rep: { ym: null, edits: {}, auto: false }, repDone: null,
   hist: { q: '', cat: '', month: '', limit: 150 },
   tableRange: '12', tableScrolled: false, showArchived: false,
   seeded: false, recDone: new Set(),
@@ -103,6 +104,7 @@ function onData(st) {
     if (server && !S.seeded) { S.seeded = true; seed(); }
     return scheduleRender();
   }
+  if (server) migrate();
   if (server || !navigator.onLine) applyRecurring();
   scheduleRender();
 }
@@ -124,6 +126,13 @@ function seed() {
   ]);
 }
 
+/** Migrations ponctuelles des données (une fois par appareil). */
+function migrate() {
+  try { if (localStorage.getItem('mig-loisirs')) return; localStorage.setItem('mig-loisirs', '1'); } catch { return; }
+  const c = S.cats.find((x) => L.norm(x.name) === 'loisirs');
+  if (c) S.store.merge('categories', c.id, { name: 'Loisirs et dépenses supplémentaires' });
+}
+
 /** Ajoute les charges récurrentes du mois en cours (une seule fois par catégorie et par mois). */
 function applyRecurring() {
   const now = new Date(); const ym = L.ymOf(now);
@@ -137,8 +146,8 @@ function applyRecurring() {
     if (now.getDate() < day) continue;
     S.recDone.add(c.id + ym); next.push(c.id);
     const id = `rec-${c.id}-${ym}`;
-    // Déjà présent (charge auto, ou montant importé du Sheet pour ce mois) : pas de doublon
-    if (S.exps.some((e) => e.id === id || e.id === `imp-${c.id}-${ym}`)) continue;
+    // Déjà présent (charge auto, montant importé du Sheet ou reporté du mois précédent) : pas de doublon
+    if (S.exps.some((e) => e.id === id || e.id === `imp-${c.id}-${ym}` || e.id === `rep-${c.id}-${ym}`)) continue;
     ops.push({ op: 'set', col: 'expenses', id, data: { amount: c.rec.amount, cat: c.id, at: `${ym}-${pad(day)}T08:00`, ym, note: 'Automatique', src: 'rec', created: Date.now() } });
   }
   if (next.length !== applied.length) {
@@ -228,7 +237,7 @@ function scheduleRender() { if (rq) return; rq = true; requestAnimationFrame(() 
 function render() {
   renderTop();
   if (!S.ready) return;
-  ({ add: renderAdd, month: renderMonth, table: renderTable, history: renderHistory, budget: renderBudget, settings: renderSettings })[S.view]();
+  ({ add: renderAdd, month: renderMonth, table: renderTable, history: renderHistory, budget: renderBudget, report: renderReport, settings: renderSettings })[S.view]();
 }
 
 function renderTop() {
@@ -256,66 +265,98 @@ function bindMonthNav(el) {
   });
 }
 
-// ---------- Saisie rapide ----------
+// ---------- Saisie : tuiles de catégories, puis feuille du montant ----------
+const catIcon = (c) => c?.icon || L.defaultIcon(c?.name) || '';
+function iconHTML(c) {
+  const ic = catIcon(c);
+  return ic ? `<span class="ic">${esc(ic)}</span>`
+    : `<span class="ic letter" style="--c:${c?.color || '#4f8cff'}">${esc((c?.name || '?').charAt(0).toUpperCase())}</span>`;
+}
 function usageCounts() {
   const since = L.localISO(new Date(Date.now() - 120 * 864e5));
   const n = {};
   for (const e of S.exps) if ((e.src || 'manual') === 'manual' && e.at >= since) n[e.cat] = (n[e.cat] || 0) + 1;
   return n;
 }
+/** Montant « comme d'habitude » : dernière saisie manuelle, sinon charge récurrente, sinon même total les deux derniers mois. */
+function usualAmount(c) {
+  let last = null;
+  for (const e of S.exps) if (e.cat === c.id && (e.src || 'manual') === 'manual' && (!last || e.at > last.at)) last = e;
+  if (last) return last.amount;
+  if (c.rec?.on && c.rec.amount) return c.rec.amount;
+  const m1 = L.addMonths(nowYM(), -1), m2 = L.addMonths(nowYM(), -2);
+  const t = (m) => S.exps.reduce((s, e) => s + (e.cat === c.id && e.ym === m ? e.amount : 0), 0);
+  const a = t(m1);
+  return a && a === t(m2) ? a : null;
+}
 function renderAdd() {
-  renderAmount();
   const cats = orderedCats();
-  const key = cats.map((c) => c.id).join();
-  if (!S.chipOrder || S.chipOrder.key !== key) {
-    const n = usageCounts(); const idx = new Map(cats.map((c, i) => [c.id, i]));
-    S.chipOrder = { key, ids: cats.map((c) => c.id).sort((a, b) => (n[b] || 0) - (n[a] || 0) || idx.get(a) - idx.get(b)) };
+  if (!cats.length) { $('#tiles').innerHTML = '<p class="muted">Aucune catégorie : ajoute-en dans Réglages.</p>'; return; }
+  const n = usageCounts();
+  const freq = cats.filter((c) => n[c.id]).sort((a, b) => n[b.id] - n[a.id]).slice(0, 4);
+  const inFreq = new Set(freq.map((c) => c.id));
+  const tile = (c) => `<button class="tile" data-id="${c.id}" style="--c:${groupById(c.groupId)?.color || c.color}">${iconHTML(c)}<span class="tn">${esc(c.name)}</span></button>`;
+  let h = freq.length ? `<div class="sec">Les plus utilisées</div><div class="tiles">${freq.map(tile).join('')}</div>` : '';
+  for (const g of S.groups.filter((x) => !x.archived)) {
+    const list = cats.filter((c) => c.groupId === g.id && !inFreq.has(c.id));
+    if (list.length) h += `<div class="sec" style="--c:${g.color}">${esc(g.name)}</div><div class="tiles">${list.map(tile).join('')}</div>`;
   }
-  $('#chips').innerHTML = S.chipOrder.ids.map((id) => {
-    const c = catById(id);
-    return `<button class="chip ${S.cat === id ? 'sel' : ''}" data-id="${id}" style="--c:${c.color || '#4f8cff'}">${esc(c.name)}</button>`;
-  }).join('') || '<p class="muted">Aucune catégorie : ajoute-en dans Réglages.</p>';
-  if (!S.whenTouched) $('#when').value = L.localISO(new Date());
+  $('#tiles').innerHTML = h;
 }
-function renderAmount() {
-  const el = $('#amount');
-  el.textContent = `${S.neg ? '−' : ''}${L.keypadDisplay(S.amount)} €`;
-  el.classList.toggle('neg', S.neg);
-  el.classList.toggle('empty', !S.amount);
-  $('#sign').classList.toggle('on', S.neg);
-  $('#sign').textContent = S.neg ? 'Gain' : '−/+';
+$('#tiles').onclick = (e) => { const t = e.target.closest('.tile'); if (t) openEntry(t.dataset.id); };
+
+const toKeypad = (cents) => String(Math.abs(cents) / 100).replace('.', ',');
+function openEntry(cid) {
+  const c = catById(cid); if (!c) return;
+  const usual = usualAmount(c);
+  const E = { amount: '', neg: false, day: 0 };
+  const sh = sheet(`<div class="e-top">${iconHTML(c)}<div class="e-t"><b>${esc(c.name)}</b><span class="muted small">${esc(groupById(c.groupId)?.name || '')}</span></div>
+      <button class="mini" id="e-x" aria-label="Fermer">✕</button></div>
+    <div class="e-amt num empty" id="e-amt">0 €</div>
+    <div class="quick">${usual ? `<button class="hab" data-v="${usual}">Comme d'habitude · ${fmt(usual)}</button>` : ''}${[1000, 2000, 5000].map((v) => `<button data-v="${v}">${v / 100} €</button>`).join('')}</div>
+    <div class="keypad" id="e-pad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', ','].map((k) => `<button data-k="${k}">${k}</button>`).join('')}<button data-k="0">0</button><button data-k="back" aria-label="Effacer">⌫</button></div>
+    <div class="e-meta"><button class="pill on" data-d="0">Aujourd'hui</button><button class="pill" data-d="1">Hier</button><button class="pill" data-d="x">Autre date</button><button class="pill" id="e-note-b">＋ Note</button><button class="pill" id="e-sign">Gain</button></div>
+    <input id="e-when" type="datetime-local" aria-label="Date et heure" hidden>
+    <input id="e-note" type="text" placeholder="Note (facultatif)" enterkeyhint="done" autocomplete="off" hidden>
+    <button class="btn primary big" id="e-go" disabled>Ajouter</button>`);
+  const show = () => {
+    const el = $('#e-amt', sh);
+    el.textContent = `${E.neg ? '−' : ''}${L.keypadDisplay(E.amount)} €`;
+    el.classList.toggle('neg', E.neg); el.classList.toggle('empty', !E.amount);
+    $('#e-sign', sh).classList.toggle('on', E.neg);
+    $('#e-go', sh).disabled = !L.keypadToCents(E.amount);
+  };
+  $('#e-x', sh).onclick = closeSheet;
+  $('#e-pad', sh).onclick = (e) => { const k = e.target.closest('button')?.dataset.k; if (k) { E.amount = L.keypadPress(E.amount, k); show(); } };
+  $('.quick', sh).onclick = (e) => { const v = e.target.closest('button')?.dataset.v; if (v) { E.amount = toKeypad(+v); E.neg = +v < 0; show(); } };
+  $('#e-sign', sh).onclick = () => { E.neg = !E.neg; show(); };
+  $('#e-note-b', sh).onclick = (e) => { e.target.hidden = true; const n = $('#e-note', sh); n.hidden = false; n.focus(); };
+  $('#e-note', sh).onkeydown = (e) => { if (e.key === 'Enter') e.target.blur(); };
+  $$('[data-d]', sh).forEach((b) => b.onclick = () => {
+    $$('[data-d]', sh).forEach((x) => x.classList.toggle('on', x === b));
+    E.day = b.dataset.d === 'x' ? 'x' : +b.dataset.d;
+    const w = $('#e-when', sh); w.hidden = E.day !== 'x';
+    if (E.day === 'x') { if (!w.value) w.value = L.localISO(new Date()); w.focus(); }
+  });
+  $('#e-go', sh).onclick = () => {
+    const cents = L.keypadToCents(E.amount);
+    if (!cents) return shake($('#e-amt', sh));
+    let at;
+    if (E.day === 'x') at = $('#e-when', sh).value || L.localISO(new Date());
+    else { const d = new Date(); d.setDate(d.getDate() - E.day); at = L.localISO(d); }
+    const data = { amount: E.neg ? -cents : cents, cat: c.id, at, ym: at.slice(0, 7), note: $('#e-note', sh).value.trim(), src: 'manual', created: Date.now() };
+    const id = S.store.newId('expenses');
+    S.store.set('expenses', id, data);
+    const warn = budgetWarning(data, id);
+    closeSheet();
+    toast(warn ? `⚠️ ${warn}` : `✓ ${fmt(data.amount)} · ${c.name}`, {
+      cls: warn ? 'warn' : 'ok', action: 'Annuler', onAction: () => S.store.del('expenses', id),
+    });
+  };
 }
-$('#keypad').onclick = (e) => {
-  const k = e.target.closest('button')?.dataset.k; if (!k) return;
-  S.amount = L.keypadPress(S.amount, k); renderAmount();
-};
-$('#sign').onclick = () => { S.neg = !S.neg; renderAmount(); };
-$('#chips').onclick = (e) => {
-  const b = e.target.closest('.chip'); if (!b) return;
-  S.cat = S.cat === b.dataset.id ? null : b.dataset.id;
-  $$('#chips .chip').forEach((x) => x.classList.toggle('sel', x.dataset.id === S.cat));
-};
-$('#when').onchange = () => { S.whenTouched = true; };
-$('#note').onkeydown = (e) => { if (e.key === 'Enter') e.target.blur(); };
-$('#add-btn').onclick = addExpense;
 
 function shake(el) { el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); }
-function addExpense() {
-  const cents = L.keypadToCents(S.amount);
-  if (!cents) { shake($('#amount')); return toast('Saisis un montant'); }
-  if (!S.cat) { shake($('#chips')); return toast('Choisis une catégorie'); }
-  const at = $('#when').value || L.localISO(new Date());
-  const data = { amount: S.neg ? -cents : cents, cat: S.cat, at, ym: at.slice(0, 7), note: $('#note').value.trim(), src: 'manual', created: Date.now() };
-  const id = S.store.newId('expenses');
-  S.store.set('expenses', id, data);
-  const warn = budgetWarning(data, id);
-  S.amount = ''; S.neg = false; S.cat = null; S.whenTouched = false;
-  $('#note').value = ''; $('#note').blur();
-  renderAdd();
-  toast(warn ? `⚠️ ${warn}` : `✓ ${fmt(data.amount)} · ${catName(data.cat)}`, {
-    cls: warn ? 'warn' : 'ok', action: 'Annuler', onAction: () => S.store.del('expenses', id),
-  });
-}
+
 function budgetWarning(data, id) {
   const c = catById(data.cat); const g = groupById(c?.groupId);
   const sum = (pred) => S.exps.filter((e) => e.id !== id && e.ym === data.ym && pred(e)).reduce((s, e) => s + e.amount, 0) + data.amount;
@@ -327,7 +368,10 @@ function budgetWarning(data, id) {
   return '';
 }
 
-// ---------- Mois en cours ----------
+// ---------- Mon mois : reste à vivre, puis un bloc « sous-total » par groupe ----------
+function saveClosed() { try { localStorage.setItem('closedGroups', JSON.stringify([...S.closed])); } catch {} }
+/** « 3 600 € + 492 € − 166 € » */
+const sumLine = (vals) => vals.map((x, i) => (i === 0 ? fmt(x) : x < 0 ? ` − ${fmt(-x)}` : ` + ${fmt(x)}`)).join('');
 function renderMonth() {
   const v = $('#v-month');
   if (v.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
@@ -336,33 +380,43 @@ function renderMonth() {
   const rest = (income || 0) - total;
   const alerts = overBudgets(ym);
   const missingRec = S.cats.filter((c) => isActiveCat(c) && c.rec?.on && c.rec.amount == null);
+  const known = new Set(S.cats.map((c) => c.id));
+  const orphan = Object.entries(byCat).filter(([id]) => !known.has(id)).reduce((s, [, x]) => s + x, 0);
+  const blocks = S.groups.map((g) => ({ g, cats: S.cats.filter((c) => c.groupId === g.id && byCat[c.id]), tot: groupTotal(g.id, byCat) }))
+    .filter((b) => b.cats.length);
   let h = monthNav(ym);
-  h += `<div class="card kpis">
-    <div class="kpi"><div class="l">Dépensé</div><div class="v">${fmt(total)}</div></div>
-    <div class="kpi"><div class="l">Revenus du mois</div><input class="income-input" id="income" inputmode="decimal" placeholder="Saisir…" value="${income != null ? fmtNum(income) : ''}"></div>
-    <div class="kpi wide"><div class="l">Reste à vivre</div><div class="v big" style="color:${income == null ? 'var(--muted)' : rest < 0 ? 'var(--red)' : 'var(--green)'}">${income == null ? 'Saisis tes revenus' : fmt(rest)}</div></div>
+  h += `<div class="hero"><div class="lab">Reste à vivre</div>
+    <div class="rav num" style="color:${income == null ? 'var(--muted)' : rest < 0 ? 'var(--red)' : 'var(--green)'}">${income == null ? 'Saisis tes revenus' : fmt(rest)}</div>
+    <div class="eq"><label class="inc">Revenus <input class="income-input num" id="income" inputmode="decimal" placeholder="Saisir…" value="${income != null ? fmtNum(income) : ''}"></label>
+      <span class="op">−</span><span>Dépenses <b class="num">${fmt(total)}</b></span></div>
+    ${total > 0 && blocks.length > 1 ? `<div class="stack">${blocks.map((b) => `<i style="flex:${Math.max(b.tot, 0)};background:${b.g.color}"></i>`).join('')}</div>
+      <div class="legend">${blocks.map((b) => `<span style="--c:${b.g.color}">${esc(b.g.name)}</span>`).join('')}</div>` : ''}
   </div>`;
+  if (ym >= nowYM() && S.repDone?.ym !== ym) {
+    const n = reportCandidates(ym).out.filter((x) => x.on).length;
+    if (n) h += `<button class="cta" id="go-report">↻ <span><b>${n} dépense${n > 1 ? 's' : ''} habituelle${n > 1 ? 's' : ''}</b> ${ofMonth(L.addMonths(ym, -1))} à reporter</span><span class="chev">›</span></button>`;
+  }
   if (alerts.length) h += `<div class="alert">⚠️ Budget dépassé : ${alerts.map((a) => `<b>${esc(a.name)}</b> (+${fmt(a.spent - a.budget)})`).join(', ')}</div>`;
   if (missingRec.length && ym === nowYM()) h += `<button class="alert" style="width:100%;text-align:left;background:rgba(255,159,10,.1);border-color:rgba(255,159,10,.35);color:#ffd08a" id="go-rec">Abonnements sans montant habituel : ${missingRec.map((c) => esc(c.name)).join(', ')}. Touchez pour les renseigner.</button>`;
-  const known = new Set(S.cats.map((c) => c.id));
-  const orphan = Object.entries(byCat).filter(([id]) => !known.has(id)).reduce((s, [, v]) => s + v, 0);
-  let any = false;
-  for (const g of S.groups) {
-    const cats = S.cats.filter((c) => c.groupId === g.id && byCat[c.id]);
-    const gt = groupTotal(g.id, byCat);
-    if (g.archived && !gt) continue;
-    if (cats.length) any = true;
-    const gb = g.budget > 0 ? budgetLine(gt, g.budget) : '';
-    h += `<div class="grp"><div class="grp-h" style="--c:${g.color}"><span class="dot"></span><span class="name">${esc(g.name)}${gb}</span><span class="num">${fmt(gt)}</span></div>
-      ${cats.sort((a, b) => byCat[b.id] - byCat[a.id]).map((c) => {
+  for (const { g, cats, tot } of blocks) {
+    const open = !S.closed.has(g.id);
+    h += `<div class="blk ${open ? '' : 'closed'}" style="--c:${g.color}">
+      <button class="blk-h" data-g="${g.id}" aria-expanded="${open}">
+        <span class="l"><span class="gname">${esc(g.name)}</span><span class="st">Sous-total · ${cats.length} ligne${cats.length > 1 ? 's' : ''}</span></span>
+        <span class="r"><span class="gtot num">${fmt(tot)}</span><span class="pct">${total > 0 ? `${Math.round(tot / total * 100)} % des dépenses` : ''}</span></span>
+        <span class="chev">›</span></button>
+      ${g.budget > 0 ? `<div class="blk-b">${budgetLine(tot, g.budget)}</div>` : ''}
+      <div class="lines">${cats.sort((a, b) => byCat[b.id] - byCat[a.id]).map((c) => {
         const val = byCat[c.id];
-        const bar = c.budget > 0 ? budgetLine(val, c.budget)
-          : `<div class="bar"><i style="width:${total > 0 ? Math.max(2, Math.min(100, val / total * 100)) : 0}%;--c:${c.color}"></i></div>`;
-        return `<div class="line btnlike" data-cat="${c.id}" style="--c:${c.color}"><span class="dot"></span><div class="name">${esc(c.name)}${bar}</div><span class="amt ${val < 0 ? 'pos' : ''}">${fmt(val)}</span></div>`;
-      }).join('')}</div>`;
+        return `<div class="line btnlike" data-cat="${c.id}">${iconHTML(c)}<div class="name">${esc(c.name)}${c.rec?.on ? '<small>chaque mois</small>' : ''}${c.budget > 0 ? budgetLine(val, c.budget) : ''}</div><span class="amt ${val < 0 ? 'pos' : ''}">${fmt(val)}</span></div>`;
+      }).join('')}</div></div>`;
   }
-  if (orphan) h += `<div class="grp"><div class="grp-h"><span class="name">Sans catégorie</span><span class="num">${fmt(orphan)}</span></div></div>`;
-  if (!any && !orphan) h += `<div class="empty-state">Aucune dépense ce mois-ci.</div>`;
+  if (orphan) h += `<div class="blk"><div class="blk-h static"><span class="l"><span class="gname">Sans catégorie</span></span><span class="r"><span class="gtot num">${fmt(orphan)}</span></span></div></div>`;
+  if (blocks.length || orphan) {
+    const parts = [...blocks.map((b) => b.tot), ...(orphan ? [orphan] : [])];
+    h += `<div class="total-card"><div class="row"><span>Total des dépenses</span><b class="num">${fmt(total)}</b></div>
+      ${parts.length > 1 ? `<div class="calc num">${sumLine(parts)} = ${fmt(total)}</div>` : ''}</div>`;
+  } else h += `<div class="empty-state">Aucune dépense ce mois-ci.<br><button class="btn primary" id="go-add" style="margin-top:12px">＋ Saisir une dépense</button></div>`;
   v.innerHTML = h;
   bindMonthNav(v);
   const inc = $('#income', v);
@@ -373,8 +427,13 @@ function renderMonth() {
   };
   inc.onkeydown = (e) => { if (e.key === 'Enter') inc.blur(); };
   inc.onblur = () => setTimeout(scheduleRender, 50);
+  $$('.blk-h[data-g]', v).forEach((b) => b.onclick = () => {
+    const id = b.dataset.g; S.closed.has(id) ? S.closed.delete(id) : S.closed.add(id); saveClosed(); renderMonth();
+  });
   $$('[data-cat]', v).forEach((el) => el.onclick = () => { S.hist = { ...S.hist, q: '', cat: el.dataset.cat, month: ym }; go('history'); });
   const gr = $('#go-rec', v); if (gr) gr.onclick = () => { go('settings'); setTimeout(() => $('#rec-section')?.scrollIntoView(), 50); };
+  const rp = $('#go-report', v); if (rp) rp.onclick = () => go('report');
+  const ga = $('#go-add', v); if (ga) ga.onclick = () => go('add');
 }
 function budgetLine(spent, budget) {
   const cls = L.budgetClass(spent, budget);
@@ -382,6 +441,89 @@ function budgetLine(spent, budget) {
   const diff = budget - spent;
   return `<div class="bar ${cls}"><i style="width:${pct}%"></i></div>
     <div class="sub ${cls === 'ok' ? '' : cls}">${fmt(spent)} / ${fmt(budget)} · ${diff >= 0 ? `reste ${fmt(diff)}` : `dépassé de ${fmt(-diff)}`}</div>`;
+}
+
+// ---------- Reporter les dépenses habituelles du mois précédent ----------
+/** « d'octobre 2026 », « de septembre 2026 » */
+const ofMonth = (ym) => { const l = L.ymLabel(ym); return (/^[aeiouy]/.test(l) ? "d'" : 'de ') + l; };
+/** Lignes du mois précédent reportables dans ym (catégories encore absentes de ym), pré-cochées si habituelles. */
+function reportCandidates(ym) {
+  const src = L.addMonths(ym, -1);
+  const a = totals(src).byCat, b = totals(L.addMonths(ym, -2)).byCat, t = totals(ym).byCat;
+  const out = [], already = [];
+  for (const c of orderedCats()) {
+    const v = a[c.id]; if (!v) continue;
+    if (t[c.id] != null) { already.push(c); continue; }
+    // Choix mémorisé au dernier report, sinon : charge récurrente ou même montant deux mois de suite
+    out.push({ c, v, on: c.habit ?? !!(c.rec?.on || v === b[c.id]) });
+  }
+  return { src, out, already };
+}
+function renderReport() {
+  const v = $('#v-report'); const ym = S.ym;
+  if (S.rep.ym !== ym) S.rep = { ym, edits: {}, auto: false };
+  let h = monthNav(ym);
+  if (S.repDone?.ym === ym) {
+    const { n, sum } = S.repDone;
+    v.innerHTML = h + `<div class="done"><div class="big">✅</div><b>${n} dépense${n > 1 ? 's' : ''} reportée${n > 1 ? 's' : ''}</b>
+      <p class="muted">${fmt(sum)} ajoutés à ${L.ymLabel(ym)}, datés du 1er.</p>
+      <div class="actions"><button class="btn" id="r-again">Reporter autre chose</button><button class="btn primary" id="r-see">Voir le mois</button></div></div>`;
+    bindMonthNav(v);
+    $('#r-see', v).onclick = () => go('month');
+    $('#r-again', v).onclick = () => { S.repDone = null; renderReport(); };
+    return;
+  }
+  const { src, out, already } = reportCandidates(ym);
+  const cur = (x) => ({ ...x, ...S.rep.edits[x.c.id] });
+  h += `<div class="banner"><b>${cap(L.ymLabel(ym))}</b><span class="muted small">Tes dépenses ${ofMonth(src)}, prêtes à être reportées. Décoche ce qui ne revient pas, corrige un montant si besoin.</span></div>`;
+  if (!out.length) h += `<div class="empty-state">${already.length ? `Tout est déjà dans ${L.ymLabel(ym)}.` : `Rien à reporter : ${L.ymLabel(src)} est vide.`}</div>`;
+  else {
+    h += out.map(cur).map((x) => `<div class="chk ${x.on ? '' : 'off'}" data-row="${x.c.id}"><label><input type="checkbox" data-i="${x.c.id}" ${x.on ? 'checked' : ''}>${iconHTML(x.c)}<span class="cn">${esc(x.c.name)}<small>${esc(groupById(x.c.groupId)?.name || '')}</small></span></label>
+      <input class="amt num" data-a="${x.c.id}" inputmode="decimal" value="${fmtNum(x.v).replace(/[  ]/g, '')}" aria-label="Montant ${esc(x.c.name)}"></div>`).join('');
+    h += `<label class="check auto"><input type="checkbox" id="r-auto" ${S.rep.auto ? 'checked' : ''}> Le faire tout seul chaque mois pour les lignes cochées</label>
+      <button class="btn primary big num" id="r-go"></button>`;
+  }
+  if (already.length) h += `<p class="muted small">Déjà dans ${L.ymLabel(ym)} : ${already.map((c) => esc(c.name)).join(', ')}.</p>`;
+  v.innerHTML = h;
+  bindMonthNav(v);
+  if (!out.length) return;
+  const refresh = () => {
+    const sel = out.map(cur).filter((x) => x.on);
+    const sum = sel.reduce((s, x) => s + x.v, 0);
+    const go = $('#r-go', v);
+    go.disabled = !sel.length;
+    go.textContent = `Reporter ${sel.length} dépense${sel.length > 1 ? 's' : ''} · ${fmt(sum)}`;
+    out.forEach((x) => $(`[data-row="${x.c.id}"]`, v).classList.toggle('off', !cur(x).on));
+  };
+  refresh();
+  v.onchange = (e) => {
+    const t = e.target;
+    if (t.dataset.i) (S.rep.edits[t.dataset.i] ||= {}).on = t.checked;
+    else if (t.dataset.a) {
+      const val = L.parseAmount(t.value);
+      if (!val) { shake(t); t.value = fmtNum(cur(out.find((x) => x.c.id === t.dataset.a)).v).replace(/[  ]/g, ''); return; }
+      (S.rep.edits[t.dataset.a] ||= {}).v = val;
+    } else if (t.id === 'r-auto') S.rep.auto = t.checked;
+    refresh();
+  };
+  $('#r-go', v).onclick = () => {
+    const all = out.map(cur); const sel = all.filter((x) => x.on);
+    if (!sel.length) return;
+    const ops = [], ids = [];
+    for (const x of sel) {
+      const id = `rep-${x.c.id}-${ym}`; ids.push(id);
+      ops.push({ op: 'set', col: 'expenses', id, data: { amount: x.v, cat: x.c.id, at: `${ym}-01T12:00`, ym, note: `Reporté ${ofMonth(src)}`, src: 'rep', created: Date.now() } });
+    }
+    // Mémorise les choix pour pré-cocher les mêmes lignes le mois suivant
+    for (const x of all) if (x.c.habit !== x.on) ops.push({ op: 'merge', col: 'categories', id: x.c.id, data: { habit: x.on } });
+    if (S.rep.auto) for (const x of sel) ops.push({ op: 'merge', col: 'categories', id: x.c.id, data: { rec: { on: true, amount: x.v, day: x.c.rec?.day || 1 } } });
+    S.store.batch(ops);
+    S.repDone = { ym, n: sel.length, sum: sel.reduce((s, x) => s + x.v, 0) };
+    renderReport();
+    toast(`✓ ${sel.length} dépense${sel.length > 1 ? 's' : ''} reportée${sel.length > 1 ? 's' : ''}`, {
+      cls: 'ok', action: 'Annuler', onAction: () => { S.store.batch(ids.map((id) => ({ op: 'delete', col: 'expenses', id }))); S.repDone = null; scheduleRender(); },
+    });
+  };
 }
 
 // ---------- Tableau mensuel ----------
@@ -413,7 +555,7 @@ function renderTable() {
     if (!cats.length) continue;
     const gVals = months.map((m) => cats.reduce((s, c) => s + (agg[c.id]?.[m] || 0), 0));
     const gs = rowSum(gVals);
-    body += `<tr class="g"><td style="color:${g.color}">${esc(g.name)}</td>${gVals.map((x) => cell(x)).join('')}${cell(gs, '', 'tot')}${cell(Math.round(gs / months.length), '', 'tot')}</tr>`;
+    body += `<tr class="g" style="--c:${g.color}"><td><small>Sous-total</small>${esc(g.name)}</td>${gVals.map((x) => cell(x)).join('')}${cell(gs, '', 'tot')}${cell(Math.round(gs / months.length), '', 'tot')}</tr>`;
     for (const c of cats) {
       const vals = months.map((m) => agg[c.id]?.[m] || 0);
       vals.forEach((x, i) => { colTot[i] += x; });
@@ -596,7 +738,8 @@ function renderBudget() {
 function renderSettings() {
   const v = $('#v-settings');
   const recTag = (c) => (c.rec?.on ? `<span class="tag ${c.rec.amount == null ? 'warn' : ''}">${c.rec.amount == null ? 'montant ?' : '↻ ' + fmt(c.rec.amount)}</span>` : '');
-  let h = '<div class="h2">Catégories et groupes</div>';
+  let h = `<div class="list-btns" style="margin-top:8px"><button class="btn" data-act="budgets">🎯 Plafonds mensuels (budgets)</button></div>
+    <div class="h2">Catégories et groupes</div>`;
   const groups = S.groups.filter((g) => !g.archived);
   for (const g of groups) {
     const cats = S.cats.filter((c) => c.groupId === g.id && !c.archived).sort(byOrder);
@@ -647,6 +790,7 @@ $('#v-settings').onclick = async (e) => {
     case 'g-restore': return S.store.merge('groups', id, { archived: false });
     case 'c-restore': return S.store.merge('categories', id, { archived: false });
     case 'toggle-arch': S.showArchived = !S.showArchived; return renderSettings();
+    case 'budgets': return go('budget');
     case 'import': return $('#file-import').click();
     case 'export-table': return exportTable();
     case 'export-all': return exportAll();
@@ -690,7 +834,8 @@ function openCatSheet(c, groupId) {
   const rec = c.rec || { on: false, amount: null, day: 1 };
   const money = (x) => (x != null ? fmtNum(x).replace(/[  ]/g, '') : '');
   const sh = sheet(`<h3>${isNew ? 'Nouvelle catégorie' : 'Modifier la catégorie'}</h3>
-    <div class="field"><span>Nom</span><input id="c-name" value="${esc(c.name)}" autocomplete="off"></div>
+    <div class="field-row" style="margin-bottom:12px"><div class="field" style="flex:1;margin:0"><span>Nom</span><input id="c-name" value="${esc(c.name)}" autocomplete="off"></div>
+      <div class="field" style="width:72px;margin:0"><span>Icône</span><input id="c-icon" value="${esc(c.icon || '')}" placeholder="${esc(L.defaultIcon(c.name) || '🙂')}" autocomplete="off" style="text-align:center"></div></div>
     <div class="field-row" style="margin-bottom:12px"><div class="field" style="flex:1;margin:0"><span>Groupe</span><select id="c-group">${S.groups.filter((g) => !g.archived || g.id === c.groupId).map((g) => `<option value="${g.id}" ${g.id === c.groupId ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></div>
       <div class="field" style="margin:0"><span>Couleur</span><input id="c-color" type="color" value="${c.color}"></div></div>
     <div class="field"><span>Plafond mensuel (facultatif)</span><input id="c-budget" inputmode="decimal" placeholder="Aucun" value="${money(c.budget)}"></div>
@@ -709,7 +854,7 @@ function openCatSheet(c, groupId) {
     if (on && av && amount == null) return shake($('#c-rec-amount', sh));
     const day = Math.min(31, Math.max(1, parseInt($('#c-rec-day', sh).value, 10) || 1));
     const gid = $('#c-group', sh).value;
-    const data = { name, groupId: gid, color: $('#c-color', sh).value, budget, rec: { on, amount, day } };
+    const data = { name, groupId: gid, color: $('#c-color', sh).value, icon: $('#c-icon', sh).value.trim() || null, budget, rec: { on, amount, day } };
     if (isNew) S.store.set('categories', S.store.newId('categories'), { ...data, order: nextOrder(S.cats.filter((x) => x.groupId === gid)), archived: false });
     else S.store.merge('categories', c.id, gid !== c.groupId ? { ...data, order: nextOrder(S.cats.filter((x) => x.groupId === gid)) } : data);
     closeSheet();
@@ -821,7 +966,7 @@ function exportAll() {
   const rows = [['Date', 'Heure', 'Catégorie', 'Groupe', 'Montant', 'Note', 'Origine']];
   for (const e of S.exps.slice().sort((a, b) => (a.at < b.at ? -1 : 1))) {
     const c = catById(e.cat);
-    rows.push([e.at.slice(0, 10), e.at.slice(11, 16), c?.name || '', groupById(c?.groupId)?.name || '', csvMoney(e.amount) || '0,00', e.note || '', { import: 'import', rec: 'automatique' }[e.src] || 'saisie']);
+    rows.push([e.at.slice(0, 10), e.at.slice(11, 16), c?.name || '', groupById(c?.groupId)?.name || '', csvMoney(e.amount) || '0,00', e.note || '', { import: 'import', rec: 'automatique', rep: 'reportée' }[e.src] || 'saisie']);
   }
   saveFile(`depenses-detail-${nowYM()}.csv`, L.toCSV(rows));
 }
@@ -884,8 +1029,6 @@ function registerSW() {
 $('#update').onclick = () => location.reload();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !S.ready) return;
-  S.chipOrder = null;
-  if (S.view === 'add' && !S.amount) S.whenTouched = false;
   applyRecurring();
   scheduleRender();
 });

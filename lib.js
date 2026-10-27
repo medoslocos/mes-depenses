@@ -97,7 +97,7 @@ export const PALETTE = ['#4f8cff', '#5ac8fa', '#bf5af2', '#ff375f', '#ff9f0a', '
 const RECURRING_DEFAULT = ['Forfait mobile', 'Netflix', 'Auteuil', 'Prime', 'YouTube Music', 'Mycanal', 'PS Plus'];
 
 export const DEFAULT_GROUPS = [
-  { id: 'g-charges', name: 'Charges et abonnements', color: '#4f8cff', cats: ['Loyer + charges courantes', 'Forfait mobile', 'Netflix', 'Auteuil', 'Prime', 'ChatGPT/Grok', 'YouTube Music', 'Voiture', 'Mycanal', 'PS Plus', 'Dépenses voiture', 'Jeux', 'Loisirs', 'Notaire', 'Apple Cloud + Vélib', 'FDM', 'Nourriture midi', 'Cotisations bancaires'] },
+  { id: 'g-charges', name: 'Charges et abonnements', color: '#4f8cff', cats: ['Loyer + charges courantes', 'Forfait mobile', 'Netflix', 'Auteuil', 'Prime', 'ChatGPT/Grok', 'YouTube Music', 'Voiture', 'Mycanal', 'PS Plus', 'Dépenses voiture', 'Jeux', 'Loisirs et dépenses supplémentaires', 'Notaire', 'Apple Cloud + Vélib', 'FDM', 'Nourriture midi', 'Cotisations bancaires'] },
   { id: 'g-autres', name: 'Autres', color: '#ff9f0a', cats: ['Algérie', 'Citygo', 'Espèces', 'Impôts', 'Intérêts', 'Appels de fonds', 'Remboursement travaux', 'Travaux'] },
   { id: 'g-epargne', name: 'Épargne et investissement', color: '#30d158', cats: ['CTO', 'Crypto', 'Studio Montgolfier', 'Vidéos IA', 'Trading', 'PEA'] },
 ];
@@ -229,6 +229,26 @@ export function matchCategory(name, cats) {
     || cats.find((c) => norm(c.name).replace(/ /g, '') === n.replace(/ /g, ''))
     || cats.find((c) => n.length >= 4 && (norm(c.name).startsWith(n) || n.startsWith(norm(c.name))))
     || null;
+}
+
+// ---------- Icônes ----------
+const ICONS = [
+  [/depenses? voiture|entretien|garage/, '🔧'], [/video/, '🎥'], [/rembours/, '💸'], [/appels? de fonds|copro|syndic/, '🏢'],
+  [/loyer|charges courantes|maison|logement/, '🏠'], [/forfait|mobile|telephone/, '📱'], [/netflix|disney|cinema/, '🎬'],
+  [/auteuil|pmu|turf/, '🏇'], [/prime|amazon/, '📦'], [/chatgpt|grok|claude|\bia\b/, '🤖'], [/youtube|music|spotify|deezer/, '🎵'],
+  [/voiture|essence|carburant|parking|peage/, '🚗'], [/canal|\btv\b|television/, '📺'], [/ps plus|playstation|xbox|console/, '🎮'],
+  [/jeux|jeu|pari/, '🎲'], [/loisir|sortie/, '🎉'], [/notaire|avocat/, '⚖️'], [/apple|cloud|icloud|velib/, '☁️'], [/fdm|shopping|vetement/, '🛍️'],
+  [/nourriture|midi|resto|repas|dejeuner/, '🥪'], [/courses|supermarche|alimentation/, '🛒'], [/cotisation|banque|bancaire|frais/, '🏦'],
+  [/algerie/, '🇩🇿'], [/citygo|covoit|uber|taxi/, '🚙'], [/espece|cash|liquide/, '💶'], [/impot|taxe/, '🧾'], [/interet/, '💰'],
+  [/travaux|bricolage/, '🔨'], [/\bcto\b|bourse|action/, '📈'], [/crypto|bitcoin/, '🪙'], [/montgolfier|studio/, '🎈'],
+  [/trading/, '📊'], [/\bpea\b|assurance vie/, '💼'], [/epargne|livret/, '🐷'], [/sante|pharmacie|medecin|mutuelle/, '💊'],
+  [/cadeau/, '🎁'], [/transport|metro|navigo|train/, '🚇'], [/sport|salle/, '🏋️'], [/voyage|vacances|avion/, '✈️'], [/revenu|salaire/, '💵'],
+];
+/** Icône par défaut d'une catégorie d'après son nom ('' si rien ne correspond). */
+export function defaultIcon(name) {
+  const n = norm(name);
+  for (const [re, ic] of ICONS) if (re.test(n)) return ic;
+  return '';
 }
 
 /** Classe la valeur d'un budget : ok (< 80 %), warn (80–100 %), over (> 100 %). */
