@@ -178,7 +178,7 @@ export function parseMonthHeader(raw) {
 
 /**
  * Analyse un export « catégories en lignes, mois en colonnes ».
- * Retourne { months: ['2024-10', ...], rows: [{ name, values: { ym: cents } , kind: 'cat'|'income'|'group' }], skipped: [...] }
+ * Retourne { months: ['2024-10', ...], rows: [{ name, group, values: { ym: cents } , kind: 'cat'|'income'|'group' }], skipped: [...] }
  */
 export function analyzeSheet(rows, { firstYear = 2024 } = {}) {
   let headerIdx = -1, cols = [];
@@ -202,9 +202,12 @@ export function analyzeSheet(rows, { firstYear = 2024 } = {}) {
   const out = [], skipped = [];
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
-    let name = '';
-    for (let j = firstMonthCol - 1; j >= 0; j--) if ((r[j] || '').trim()) { name = r[j].trim(); break; }
+    let name = '', nameCol = -1;
+    for (let j = firstMonthCol - 1; j >= 0; j--) if ((r[j] || '').trim()) { name = r[j].trim(); nameCol = j; break; }
     if (!name) continue;
+    // Colonne « Groupe » éventuelle à gauche du nom
+    let group = '';
+    for (let j = nameCol - 1; j >= 0; j--) if ((r[j] || '').trim()) { group = r[j].trim(); break; }
     const n = norm(name);
     const values = {}; let any = false;
     for (const c of cols) {
@@ -213,7 +216,7 @@ export function analyzeSheet(rows, { firstYear = 2024 } = {}) {
     }
     if (/^(sous )?total|^reste|^solde|^moyenne|^ecart|^difference/.test(n)) { skipped.push(name); continue; }
     if (/revenu|salaire|^paie|^income/.test(n)) { out.push({ name, values, kind: 'income' }); continue; }
-    out.push({ name, values, kind: any ? 'cat' : 'group' });
+    out.push({ name, group, values, kind: any ? 'cat' : 'group' });
   }
   return { months: [...new Set(cols.map((c) => c.ym))].sort(), rows: out, skipped };
 }

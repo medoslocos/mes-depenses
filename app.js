@@ -2,7 +2,7 @@ import { FIREBASE_CONFIG } from './firebase-config.js';
 import * as L from './lib.js';
 import { firestoreStore, demoStore, setWriteErrorHandler } from './store.js';
 
-const APP_VERSION = '20261026-231853';
+const APP_VERSION = '20261027-132125';
 const SDK = 'https://www.gstatic.com/firebasejs/12.0.0/';
 const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const DEMO = LOCAL && new URLSearchParams(location.search).has('demo');
@@ -624,7 +624,7 @@ function renderSettings() {
       <button class="mini" data-act="c-edit" data-id="${c.id}" aria-label="Modifier">✎</button></div>`).join('')}
     <div class="set-row"><span class="muted small" style="white-space:normal">Pour rendre une autre catégorie récurrente : ✎ sur la catégorie.</span></div></div>`;
   h += `<div class="h2">Données</div><div class="list-btns">
-    <button class="btn" data-act="import">⬆︎ Importer mon historique (CSV)</button>
+    <button class="btn" data-act="import">⬆︎ Importer un CSV</button>
     <button class="btn" data-act="export-table">⬇︎ Exporter le tableau mensuel (CSV)</button>
     <button class="btn" data-act="export-all">⬇︎ Exporter toutes les dépenses (CSV)</button></div>
     <p class="muted small">Import : export CSV de ton Google Sheets (Fichier › Télécharger › CSV), catégories en lignes et mois en colonnes (« Octobre 2024 », « oct.-24 », « 10/2024 »…). Les catégories inconnues sont créées ; réimporter remplace l'import précédent des mêmes mois.</p>`;
@@ -729,8 +729,14 @@ $('#file-import').onchange = async (e) => {
   catch (err) { toast(err.message, { cls: 'warn', ms: 6000 }); }
 };
 function previewImport(an) {
-  let ctx = null; const newCats = []; const sums = new Map(); const income = {};
+  let ctx = null; const newCats = []; const newGroups = []; const sums = new Map(); const income = {};
   const pool = S.cats.slice();
+  const groupNamed = (name) => {
+    const n = L.norm(name);
+    let g = [...S.groups, ...newGroups].find((x) => L.norm(x.name) === n);
+    if (!g) { g = { id: S.store.newId('groups'), name, color: L.PALETTE[(S.groups.length + newGroups.length) % L.PALETTE.length], order: nextOrder(S.groups) + newGroups.length * 10, archived: false, budget: null }; newGroups.push(g); }
+    return g;
+  };
   let otherGroup = S.groups.find((g) => L.norm(g.name) === 'autres') || S.groups[0];
   for (const r of an.rows) {
     const asGroup = S.groups.find((g) => L.norm(g.name) === L.norm(r.name));
@@ -739,7 +745,7 @@ function previewImport(an) {
     if (r.kind === 'income') { for (const [m, v] of Object.entries(r.values)) income[m] = (income[m] || 0) + v; continue; }
     let c = L.matchCategory(r.name, pool);
     if (!c) {
-      const g = ctx || otherGroup;
+      const g = r.group ? groupNamed(r.group) : ctx || otherGroup;
       c = { id: S.store.newId('categories'), name: r.name, groupId: g.id, color: L.PALETTE[(S.cats.length + newCats.length) % L.PALETTE.length], order: 1000 + newCats.length * 10, archived: false, budget: null, rec: { on: false, amount: null, day: 1 } };
       newCats.push(c); pool.push(c);
     }
@@ -753,19 +759,21 @@ function previewImport(an) {
       <b>${months.length} mois</b> (${L.ymLabel(months[0])} → ${L.ymLabel(months[months.length - 1])})<br>
       <b>${sums.size}</b> montants pour un total de <b>${fmt(total)}</b><br>
       ${Object.keys(income).length ? `Revenus trouvés sur <b>${Object.keys(income).length}</b> mois<br>` : ''}
-      ${newCats.length ? `Nouvelles catégories (${newCats.length}) :<ul>${newCats.map((c) => `<li>${esc(c.name)} <span class="muted">→ ${esc(groupById(c.groupId)?.name || '')}</span></li>`).join('')}</ul>` : 'Toutes les catégories sont reconnues.'}
+      ${newGroups.length ? `Nouveaux groupes : <b>${newGroups.map((g) => esc(g.name)).join(', ')}</b><br>` : ''}
+      ${newCats.length ? `Nouvelles catégories (${newCats.length}) :<ul>${newCats.map((c) => `<li>${esc(c.name)} <span class="muted">→ ${esc((groupById(c.groupId) || newGroups.find((g) => g.id === c.groupId))?.name || '')}</span></li>`).join('')}</ul>` : 'Toutes les catégories sont reconnues.'}
       ${an.skipped.length ? `<div class="muted small" style="margin-top:6px">Lignes ignorées : ${an.skipped.map(esc).join(', ')}</div>` : ''}
     </div>
-    <p class="muted small">Chaque montant devient une dépense datée du 1er du mois (note « Import Sheets »). Un import précédent des mêmes mois est remplacé.${curIncluded ? ' <b>Le mois en cours est inclus :</b> attention aux doublons avec ce que tu as déjà saisi dans l\'app.' : ''}</p>
+    <p class="muted small">Chaque montant devient une dépense datée du 1er du mois (note « Import historique »). Un import précédent des mêmes mois est remplacé.${curIncluded ? ' <b>Le mois en cours est inclus :</b> attention aux doublons avec ce que tu as déjà saisi dans l\'app.' : ''}</p>
     <div class="actions"><button class="btn" id="i-cancel">Annuler</button><button class="btn primary" id="i-go">Importer</button></div>`);
   $('#i-cancel', sh).onclick = closeSheet;
   $('#i-go', sh).onclick = () => {
     const ops = [];
     const keep = new Set();
+    for (const g of newGroups) ops.push({ op: 'set', col: 'groups', id: g.id, data: strip(g) });
     for (const c of newCats) ops.push({ op: 'set', col: 'categories', id: c.id, data: strip(c) });
     for (const [k, v] of sums) {
       const [cid, m] = k.split('|'); const id = `imp-${cid}-${m}`; keep.add(id);
-      ops.push({ op: 'set', col: 'expenses', id, data: { amount: v, cat: cid, at: `${m}-01T12:00`, ym: m, note: 'Import Sheets', src: 'import', created: Date.now() } });
+      ops.push({ op: 'set', col: 'expenses', id, data: { amount: v, cat: cid, at: `${m}-01T12:00`, ym: m, note: 'Import historique', src: 'import', created: Date.now() } });
     }
     for (const e of S.exps) if (e.src === 'import' && months.includes(e.ym) && !keep.has(e.id)) ops.push({ op: 'delete', col: 'expenses', id: e.id });
     // Une charge auto déjà ajoutée est remplacée par le montant importé du même mois
